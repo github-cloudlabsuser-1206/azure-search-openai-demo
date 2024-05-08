@@ -74,11 +74,45 @@ class Document:
     def trim_embedding(cls, embedding: Optional[List[float]]) -> Optional[str]:
         """Returns a trimmed list of floats from the vector embedding."""
         if embedding:
-            if len(embedding) > 2:
-                # Format the embedding list to show the first 2 items followed by the count of the remaining items."""
-                return f"[{embedding[0]}, {embedding[1]} ...+{len(embedding) - 2} more]"
-            else:
-                return str(embedding)
+            # Trim the embedding to a fixed lengthf len(embedding) > 2:
+            trimmed_embedding = embedding[:10]
+            # Convert the trimmed embedding to a string
+            embedding_str = ",".join(str(value) for value in trimmed_embedding)
+            return embedding_str
+        return None
+
+    async def compute_image_embedding(self, q: str):
+        endpoint = urljoin(self.vision_endpoint, "computervision/retrieval:vectorizeText")
+        headers = {"Content-Type": "application/json"}
+        params = {"api-version": "2023-02-01-preview", "modelVersion": "latest"}
+        data = {"text": q}
+
+        headers["Authorization"] = "Bearer " + await self.vision_token_provider()
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url=endpoint, params=params, headers=headers, json=data, raise_for_status=True
+            ) as response:
+                # Handle the response and extract the image query vector
+                response_data = await response.json()
+                image_query_vector = response_data.get("vector")
+        return VectorizedQuery(vector=image_query_vector, k_nearest_neighbors=50, fields="imageEmbedding")
+
+    async def run(
+        self, messages: list[dict], stream: bool = False, session_state: Any = None, context: dict[str, Any] = {}
+    ) -> Union[dict[str, Any], AsyncGenerator[dict[str, Any], None]]:
+        """
+        Runs the approach with the given messages and returns the results.
+        Args:
+            messages: A list of messages to process.
+            stream: A flag indicating whether to stream the results or not.
+            session_state: The session state object.
+            context: The context object.
+        Returns:
+            If stream is True, returns an asynchronous generator of results.
+            Otherwise, returns a dictionary of results.
+        """
+        raise NotImplementedError
 
         return None
 
@@ -90,7 +124,14 @@ class ThoughtStep:
     props: Optional[dict[str, Any]] = None
 
 
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypedDict, Union
+from abc import ABC
+
 class Approach(ABC):
+    """
+    Base class for different approaches in the search application.
+    """
+
     def __init__(
         self,
         search_client: SearchClient,
@@ -98,13 +139,29 @@ class Approach(ABC):
         auth_helper: AuthenticationHelper,
         query_language: Optional[str],
         query_speller: Optional[str],
-        embedding_deployment: Optional[str],  # Not needed for non-Azure OpenAI or for retrieval_mode="text"
+        embedding_deployment: Optional[str],
         embedding_model: str,
         embedding_dimensions: int,
         openai_host: str,
         vision_endpoint: str,
         vision_token_provider: Callable[[], Awaitable[str]],
     ):
+        """
+        Initializes the Approach class.
+
+        Args:
+            search_client: The search client.
+            openai_client: The OpenAI client.
+            auth_helper: The authentication helper.
+            query_language: The query language.
+            query_speller: The query speller.
+            embedding_deployment: The embedding deployment.
+            embedding_model: The embedding model.
+            embedding_dimensions: The embedding dimensions.
+            openai_host: The OpenAI host.
+            vision_endpoint: The vision endpoint.
+            vision_token_provider: The vision token provider.
+        """
         self.search_client = search_client
         self.openai_client = openai_client
         self.auth_helper = auth_helper
@@ -117,7 +174,17 @@ class Approach(ABC):
         self.vision_endpoint = vision_endpoint
         self.vision_token_provider = vision_token_provider
 
-    def build_filter(self, overrides: dict[str, Any], auth_claims: dict[str, Any]) -> Optional[str]:
+    def build_filter(self, overrides: Dict[str, Any], auth_claims: Dict[str, Any]) -> Optional[str]:
+        """
+        Builds the filter based on the provided overrides and authentication claims.
+
+        Args:
+            overrides: The filter overrides.
+            auth_claims: The authentication claims.
+
+        Returns:
+            The built filter as a string or None if no filters are applied.
+        """
         exclude_category = overrides.get("exclude_category")
         security_filter = self.auth_helper.build_security_filters(overrides, auth_claims)
         filters = []
@@ -138,7 +205,22 @@ class Approach(ABC):
         minimum_search_score: Optional[float],
         minimum_reranker_score: Optional[float],
     ) -> List[Document]:
-        # Use semantic ranker if requested and if retrieval mode is text or hybrid (vectors + text)
+        """
+        Performs a search operation.
+
+        Args:
+            top: The number of results to retrieve.
+            query_text: The query text.
+            filter: The filter to apply.
+            vectors: The vector queries.
+            use_semantic_ranker: Whether to use the semantic ranker.
+            use_semantic_captions: Whether to use semantic captions.
+            minimum_search_score: The minimum search score.
+            minimum_reranker_score: The minimum reranker score.
+
+        Returns:
+            A list of Document objects representing the search results.
+        """
         if use_semantic_ranker and query_text:
             results = await self.search_client.search(
                 search_text=query_text,
@@ -189,7 +271,18 @@ class Approach(ABC):
 
     def get_sources_content(
         self, results: List[Document], use_semantic_captions: bool, use_image_citation: bool
-    ) -> list[str]:
+    ) -> List[str]:
+        """
+        Retrieves the content of the sources.
+
+        Args:
+            results: The list of Document objects representing the search results.
+            use_semantic_captions: Whether to use semantic captions.
+            use_image_citation: Whether to use image citation.
+
+        Returns:
+            A list of strings representing the content of the sources.
+        """
         if use_semantic_captions:
             return [
                 (self.get_citation((doc.sourcepage or ""), use_image_citation))
@@ -204,6 +297,16 @@ class Approach(ABC):
             ]
 
     def get_citation(self, sourcepage: str, use_image_citation: bool) -> str:
+        """
+        Retrieves the citation for a source.
+
+        Args:
+            sourcepage: The source page.
+            use_image_citation: Whether to use image citation.
+
+        Returns:
+            The citation as a string.
+        """
         if use_image_citation:
             return sourcepage
         else:
@@ -216,6 +319,15 @@ class Approach(ABC):
             return sourcepage
 
     async def compute_text_embedding(self, q: str):
+        """
+        Computes the text embedding for a given query.
+
+        Args:
+            q: The query text.
+
+        Returns:
+            A VectorizedQuery object representing the text embedding.
+        """
         SUPPORTED_DIMENSIONS_MODEL = {
             "text-embedding-ada-002": False,
             "text-embedding-3-small": True,
@@ -229,7 +341,6 @@ class Approach(ABC):
             {"dimensions": self.embedding_dimensions} if SUPPORTED_DIMENSIONS_MODEL[self.embedding_model] else {}
         )
         embedding = await self.openai_client.embeddings.create(
-            # Azure OpenAI takes the deployment name as the model name
             model=self.embedding_deployment if self.embedding_deployment else self.embedding_model,
             input=q,
             **dimensions_args,
@@ -238,6 +349,15 @@ class Approach(ABC):
         return VectorizedQuery(vector=query_vector, k_nearest_neighbors=50, fields="embedding")
 
     async def compute_image_embedding(self, q: str):
+        """
+        Computes the image embedding for a given query.
+
+        Args:
+            q: The query text.
+
+        Returns:
+            A VectorizedQuery object representing the image embedding.
+        """
         endpoint = urljoin(self.vision_endpoint, "computervision/retrieval:vectorizeText")
         headers = {"Content-Type": "application/json"}
         params = {"api-version": "2023-02-01-preview", "modelVersion": "latest"}
@@ -254,6 +374,18 @@ class Approach(ABC):
         return VectorizedQuery(vector=image_query_vector, k_nearest_neighbors=50, fields="imageEmbedding")
 
     async def run(
-        self, messages: list[dict], stream: bool = False, session_state: Any = None, context: dict[str, Any] = {}
-    ) -> Union[dict[str, Any], AsyncGenerator[dict[str, Any], None]]:
+        self, messages: List[Dict[str, Any]], stream: bool = False, session_state: Any = None, context: Dict[str, Any] = {}
+    ) -> Union[Dict[str, Any], AsyncGenerator[Dict[str, Any], None]]:
+        """
+        Runs the approach.
+
+        Args:
+            messages: The list of messages.
+            stream: Whether to stream the results.
+            session_state: The session state.
+            context: The context.
+
+        Returns:
+            A dictionary or an asynchronous generator of dictionaries representing the results.
+        """
         raise NotImplementedError
